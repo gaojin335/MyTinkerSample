@@ -1,0 +1,180 @@
+apply plugin: 'com.android.application'
+
+def javaVersion = JavaVersion.VERSION_1_7
+// buildDir变量指module下面的build目录
+def bakPath = file("${buildDir}/bakPath")
+
+android {
+    signingConfigs {
+        config {
+            keyAlias 'gb'
+            keyPassword 'gb.com'
+            storeFile file('/Users/gaobo/Public/sign/keystore.jks')
+            storePassword 'gb.com'
+        }
+    }
+    compileSdkVersion 26
+    buildToolsVersion "26.0.0"
+    defaultConfig {
+        applicationId "com.gb.tt"
+        minSdkVersion 14
+        targetSdkVersion 26
+        versionCode 1
+        versionName "1.0"
+
+        testInstrumentationRunner "android.support.test.runner.AndroidJUnitRunner"
+
+    }
+    buildTypes {
+        release {
+            minifyEnabled true
+            proguardFiles getDefaultProguardFile('proguard-android.txt'), 'proguard-rules.pro'
+            signingConfig signingConfigs.config
+        }
+        debug {
+            signingConfig signingConfigs.config
+        }
+    }
+}
+
+dependencies {
+    compile fileTree(include: ['*.jar'], dir: 'libs')
+    androidTestCompile('com.android.support.test.espresso:espresso-core:2.2.2', {
+        exclude group: 'com.android.support', module: 'support-annotations'
+    })
+    compile 'com.android.support:appcompat-v7:26.+'
+    compile 'com.android.support.constraint:constraint-layout:1.0.2'
+    testCompile 'junit:junit:4.12'
+    // 引入 Tinker 热修复
+    //optional, help to generate the final application
+    provided("com.tencent.tinker:tinker-android-anno:${TINKER_VERSION}") { changing = true }
+    //tinker's main Android lib
+    compile("com.tencent.tinker:tinker-android-lib:${TINKER_VERSION}") { changing = true }
+}
+
+ext {
+    // 启用Tinker的开头
+    tinkerEnable = true
+    tinkerOldApkPath = "${bakPath}/"
+    tinkerId = "1.0"
+    tinkerApplyMappingPath = "${bakPath}/"
+    tinkerApplyResourceMappingPath = "${bakPath}/"
+}
+
+def buildWithTinker() {
+    tinkerEnable
+}
+
+def getOldApkPath() {
+    tinkerOldApkPath
+}
+
+def getApplyMappingPath() {
+    ext.tinkerApplyMappingPath
+}
+
+def getApplyResourceMappingPath() {
+    ext.tinkerApplyResourceMappingPath
+}
+
+def getTinkerIdValue() {
+    ext.tinkerId
+}
+
+if (buildWithTinker()) {
+    apply(plugin: 'com.tencent.tinker.patch')
+
+    // 所有Tinker相关的配置
+    tinkerPatch {
+        tinkerEnable = buildWithTinker()
+        oldApk = getOldApkPath()
+        ignoreWarning = false
+        useSign = true
+
+        buildConfig {
+            // 指定tinker id
+            tinkerId = getTinkerIdValue()
+            // 指定old apk打包时所使用的混淆文件
+            applyMapping = getApplyMappingPath()
+            // 指定old apk的资源文件
+            applyResourceMapping = getApplyResourceMappingPath()
+            keepDexApply = false
+        }
+
+        dex {
+            // jar模式：tinker会将dex压缩成jar文件进行处理，生成的patch文件体积会相对小一些；
+            // raw模式：tinker直接对dex文件进行处理，只支持API14及以上
+            dexMode = "jar"
+            // 指要处理的dex的目录，如果没有分包，那么只有一个classes.dex，如果分包会生成
+            // classes1.dex、classes2.dex等，因为classes*.dex这个通配符可以匹配出所有dex
+            // 第二个参数是tinker官方demo中写的，大家写上即可
+            pattern = ["classes*.dex", "assets/secondary-dex-?.jar"]
+
+            loader = ["com.gb.mytinker.tinker.MyTinkerApplication"]
+        }
+        // 配置lib块
+        lib {
+            pattern = ["lib/*/*.so"]
+        }
+
+        res {
+            // 指定tinker可以修改的所有资源文件路径
+            pattern = ["res/*", "assets/*", "resource.arcs", "AndroidManifest.xml"]
+            // 指定不受影响的资源文件路径
+            ignoreChange = ["assets/sample_meta.txt"]
+            // 资源的默认改变大小，这个指定100K即可，如果资源修改超过了100K，tinker会使用bsdeffer算法来减少patch文件的体积，
+            largeModSize = 100
+        }
+    }
+
+    // 判断是否配置了多渠道
+    List<String> flavors = new ArrayList<>();
+    project.android.productFlavors.each { flavor ->
+        flavors.add(flavor.name)
+    }
+    boolean hasFlavors = flavors.size() > 0
+    def date = new Date().format("MMdd-HH-mm-ss")
+
+/**
+ * bak apk and mapping
+ */
+    android.applicationVariants.all { variant ->
+        /**
+         * task type, you want to bak
+         */
+        def taskName = variant.name
+
+        tasks.all {
+            if ("assemble${taskName.capitalize()}".equalsIgnoreCase(it.name)) {
+
+                it.doLast {
+                    copy {
+                        def fileNamePrefix = "${project.name}-${variant.baseName}"
+                        def newFileNamePrefix = hasFlavors ? "${fileNamePrefix}" : "${fileNamePrefix}-${date}"
+
+                        def destPath = hasFlavors ? file("${bakPath}/${project.name}-${date}/${variant.flavorName}") : bakPath
+                        from variant.outputs.outputFile
+                        into destPath
+                        rename { String fileName ->
+                            fileName.replace("${fileNamePrefix}.apk", "${newFileNamePrefix}.apk")
+                        }
+
+                        from "${buildDir}/outputs/mapping/${variant.dirName}/mapping.txt"
+                        into destPath
+                        rename { String fileName ->
+                            fileName.replace("mapping.txt", "${newFileNamePrefix}-mapping.txt")
+                        }
+
+                        from "${buildDir}/intermediates/symbols/${variant.dirName}/R.txt"
+                        into destPath
+                        rename { String fileName ->
+                            fileName.replace("R.txt", "${newFileNamePrefix}-R.txt")
+                        }
+                    }
+                }
+            }
+        }
+    }
+}
+
+
